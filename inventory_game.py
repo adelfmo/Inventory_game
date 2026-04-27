@@ -2,6 +2,7 @@ import html as html_escape
 import random
 import re
 import textwrap
+import uuid
 
 import pandas as pd
 import requests
@@ -201,7 +202,7 @@ class Config:
 
 cfg = Config()
 
-GOOGLE_SCRIPT_URL = "PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE"
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw5dmER4cIUGVo72a0u4IgsuzdokTrVsz2RNjBjGA2-f5ATEcv9DKgyQtCPCtSDgSh5/exec"
 
 
 # =========================================================
@@ -210,6 +211,7 @@ GOOGLE_SCRIPT_URL = "PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE"
 
 
 def init_game():
+    st.session_state.game_id = str(uuid.uuid4())
     st.session_state.month = 1
     st.session_state.inventory = cfg.initial_inventory
     st.session_state.pipeline = []
@@ -288,6 +290,11 @@ def event_chip(label, value, tone="neutral"):
             <strong>{html_escape.escape(str(value))}</strong>
         </div>
     """
+
+
+def dataframe_records_for_json(df):
+    report_df = df.astype(object).where(pd.notna(df), "")
+    return report_df.to_dict(orient="records")
 
 
 def submit_result_to_google_sheet(payload):
@@ -560,21 +567,34 @@ def submit_game_result_if_needed(df):
     service_level = total_fulfilled / total_need if total_need > 0 else 0
 
     payload = {
+        "game_id": st.session_state.get("game_id", str(uuid.uuid4())),
         "player_name": st.session_state.player_name,
         "player_email": st.session_state.player_email,
         "service_level": round(service_level * 100, 1),
-        "total_inventory_cost": round(df["Inventory Holding Cost"].sum(), 0),
-        "total_backlog_cost": round(df["Backlog Cost"].sum(), 0),
-        "cumulative_total_cost": round(df["Cumulative Total Cost"].iloc[-1], 0),
-        "months_played": len(st.session_state.history),
+        "total_inventory_cost": round(float(df["Inventory Holding Cost"].sum()), 0),
+        "total_backlog_cost": round(float(df["Backlog Cost"].sum()), 0),
+        "cumulative_total_cost": round(float(df["Cumulative Total Cost"].iloc[-1]), 0),
+        "months_played": int(len(st.session_state.history)),
+        "peak_pipeline": round(float(df["Pipeline"].max()), 0),
+        "peak_backlog": round(float(df["Ending Backlog"].max()), 0),
+        "history": dataframe_records_for_json(df),
     }
 
     try:
         response = submit_result_to_google_sheet(payload)
-        if response.status_code == 200:
+        response.raise_for_status()
+
+        try:
+            result = response.json()
+        except ValueError:
+            result = {}
+
+        status = result.get("status", "ok")
+        if status in ["ok", "duplicate"]:
             st.session_state.submitted = True
+            st.success(f"Your final report has been saved and emailed to {st.session_state.player_email}.")
         else:
-            st.warning("Result submission failed.")
+            st.warning(f"Result not submitted: {result.get('message', 'Unknown error')}")
     except Exception as e:
         st.warning(f"Result not submitted: {e}")
 
@@ -1517,15 +1537,14 @@ def animate_month(row):
                 async function playSequence() {{
                     try {{
                         await audio.resume();
-                        tone(520, 0.03, 0.055, "square", 0.035);      // click tick
-                        noise(0.35, 0.16, 0.035);                    // boxes rolling
+                        tone(520, 0.03, 0.055, "square", 0.035);
+                        noise(0.35, 0.16, 0.035);
                         tone(220, 0.40, 0.18, "triangle", 0.030);
-                        tone(330, 0.72, 0.12, "triangle", 0.024);    // parts moving
+                        tone(330, 0.72, 0.12, "triangle", 0.024);
                         tone(420, 0.92, 0.11, "triangle", 0.022);
-                        tone(660, 1.22, 0.09, "sine", 0.026);        // notification chime
+                        tone(660, 1.22, 0.09, "sine", 0.026);
                         tone(880, 1.34, 0.12, "sine", 0.022);
                     }} catch (err) {{
-                        // Browser audio policies can block sound until the user interacts.
                     }}
                 }}
 
@@ -2156,45 +2175,7 @@ if st.session_state.history:
 
 
 # =========================================================
-# SECTION 11: AUTO-SUBMIT WHEN GAME ENDS
-# =========================================================
-
-if st.session_state.history and st.session_state.month > cfg.months and not st.session_state.submitted:
-    df = pd.DataFrame(st.session_state.history)
-
-    total_need = df["Total Customer Need"].sum()
-    total_fulfilled = df["Fulfilled"].sum()
-    service_level = total_fulfilled / total_need if total_need > 0 else 0
-
-    total_inventory_cost = df["Inventory Holding Cost"].sum()
-    total_backlog_cost = df["Backlog Cost"].sum()
-    cumulative_total_cost = df["Cumulative Total Cost"].iloc[-1]
-
-    payload = {
-        "player_name": st.session_state.player_name,
-        "player_email": st.session_state.player_email,
-        "service_level": round(service_level * 100, 1),
-        "total_inventory_cost": round(total_inventory_cost, 0),
-        "total_backlog_cost": round(total_backlog_cost, 0),
-        "cumulative_total_cost": round(cumulative_total_cost, 0),
-        "months_played": len(st.session_state.history),
-    }
-
-    try:
-        response = submit_result_to_google_sheet(payload)
-
-        if response.status_code == 200:
-            st.session_state.submitted = True
-            st.success("Your result has been submitted.")
-        else:
-            st.error("Result submission failed.")
-
-    except Exception as e:
-        st.warning(f"Result not submitted: {e}")
-
-
-# =========================================================
-# SECTION 12: TABLE
+# SECTION 11: TABLE
 # =========================================================
 
 if st.session_state.history:
@@ -2205,7 +2186,7 @@ if st.session_state.history:
 
 
 # =========================================================
-# SECTION 13: GRAPH
+# SECTION 12: GRAPH
 # =========================================================
 
 if st.session_state.history:
